@@ -5,6 +5,11 @@ import re
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import HuggingFaceEmbeddings
 from groq import Groq
+import easyocr
+from PIL import Image
+import io
+import sys
+import numpy as np
 
 # Hardcoded Groq API Key
 GROQ_API_KEY = "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"
@@ -19,6 +24,11 @@ def get_embeddings_model():
 def get_groq_client():
     return Groq(api_key=GROQ_API_KEY)
 
+# Initialize EasyOCR reader
+@st.cache_resource
+def get_ocr_reader():
+    return easyocr.Reader(['en'])
+
 # Load PDF and extract text
 def load_pdf(file) -> str:
     with pdfplumber.open(file) as pdf:
@@ -28,6 +38,38 @@ def load_pdf(file) -> str:
             if page_text:
                 text += page_text + "\n"
     return text
+
+# Extract text from image using OCR
+def extract_text_from_image(image_file) -> str:
+    # Get the OCR reader
+    reader = get_ocr_reader()
+    
+    # Open image and convert to numpy array
+    image = Image.open(image_file)
+    image_np = np.array(image)
+    
+    # Perform OCR
+    results = reader.readtext(image_np)
+    
+    # Extract text from results
+    text = "\n".join([result[1] for result in results])
+    return text
+
+# Process multiple image files
+def process_images(image_files) -> str:
+    combined_text = ""
+    progress_bar = st.progress(0)
+    
+    for i, image_file in enumerate(image_files):
+        with st.spinner(f"Processing image {i+1}/{len(image_files)}..."):
+            text = extract_text_from_image(image_file)
+            combined_text += text + "\n\n"
+        
+        # Update progress
+        progress = (i + 1) / len(image_files)
+        progress_bar.progress(progress)
+    
+    return combined_text
 
 # Cache text splitting
 def split_text(text: str) -> list[str]:
@@ -106,11 +148,11 @@ def generate_questions(
 def main():
     st.title("SLS Question Paper Generator")
     
-    # Initialize session state for storing PDF chunks
-    if "pdf_chunks" not in st.session_state:
-        st.session_state["pdf_chunks"] = None
-    if "pdf_name" not in st.session_state:
-        st.session_state["pdf_name"] = None
+    # Initialize session state for storing chunks
+    if "chunks" not in st.session_state:
+        st.session_state["chunks"] = None
+    if "source_name" not in st.session_state:
+        st.session_state["source_name"] = None
     
     st.sidebar.header("Parameters")
     difficulty = st.sidebar.selectbox(
@@ -133,31 +175,62 @@ def main():
     selected_model = st.sidebar.selectbox("Select Groq Model", list(model_options.keys()))
     model_name = model_options[selected_model]
     
-    # Upload PDF section
-    st.header("Upload PDF")
-    uploaded_file = st.file_uploader(
-        "Upload PDF of Course Material", type="pdf"
-    )
+    # Choose input type (PDF or Images)
+    input_type = st.radio("Select Input Type", ["PDF Document", "Book Images"])
+    
+    if input_type == "PDF Document":
+        # Upload PDF section
+        uploaded_file = st.file_uploader(
+            "Upload PDF of Course Material", type="pdf"
+        )
 
-    if uploaded_file:
-        if st.button("Process PDF"):
-            with st.spinner("Extracting text from PDF..."):
-                text = load_pdf(uploaded_file)
-            
-            with st.spinner("Splitting text into chunks..."):
-                chunks = split_text(text)
-                st.session_state["pdf_chunks"] = chunks
-                st.session_state["pdf_name"] = uploaded_file.name
-                st.success(f"Processed '{uploaded_file.name}' into {len(chunks)} chunks.")
+        if uploaded_file:
+            if st.button("Process PDF"):
+                with st.spinner("Extracting text from PDF..."):
+                    text = load_pdf(uploaded_file)
+                
+                with st.spinner("Splitting text into chunks..."):
+                    chunks = split_text(text)
+                    st.session_state["chunks"] = chunks
+                    st.session_state["source_name"] = uploaded_file.name
+                    st.success(f"Processed '{uploaded_file.name}' into {len(chunks)} chunks.")
+    
+    else:  # Images option
+        st.info("The first time you use image processing, it may take a minute to download the OCR model.")
+        
+        # Upload multiple images
+        uploaded_images = st.file_uploader(
+            "Upload Images of Book Pages", type=["jpg", "jpeg", "png"], accept_multiple_files=True
+        )
+        
+        if uploaded_images:
+            if st.button("Process Images"):
+                try:
+                    st.info(f"Processing {len(uploaded_images)} images with EasyOCR...")
+                    
+                    with st.spinner("Extracting text from images using OCR..."):
+                        text = process_images(uploaded_images)
+                        
+                    # Display extracted text for review
+                    with st.expander("Review extracted text"):
+                        st.text_area("Extracted text", text, height=200, disabled=True)
+                    
+                    with st.spinner("Splitting text into chunks..."):
+                        chunks = split_text(text)
+                        st.session_state["chunks"] = chunks
+                        st.session_state["source_name"] = f"{len(uploaded_images)} book images"
+                        st.success(f"Processed {len(uploaded_images)} images into {len(chunks)} chunks.")
+                except Exception as e:
+                    st.error(f"Error processing images: {str(e)}")
     
     # Show question generation section if chunks are available
-    if st.session_state["pdf_chunks"]:
+    if st.session_state["chunks"]:
         st.markdown("---")
         st.markdown("### Generate Questions")
-        st.write(f"Using PDF: {st.session_state['pdf_name']}")
+        st.write(f"Using: {st.session_state['source_name']}")
         
         if st.button("Generate Questions"):
-            chunks = st.session_state["pdf_chunks"]
+            chunks = st.session_state["chunks"]
             
             with st.spinner("Generating questions with Groq..."):
                 result = generate_questions(
