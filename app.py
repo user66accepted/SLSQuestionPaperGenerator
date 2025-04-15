@@ -3,7 +3,7 @@ import pdfplumber
 import os
 import re
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 from groq import Groq
 import easyocr
 from PIL import Image
